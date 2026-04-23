@@ -1,0 +1,9 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: baby-photo-app
+    ports:
+      - "3456:3456"
+    restart: unless-stopped

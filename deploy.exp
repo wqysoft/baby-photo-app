@@ -1,0 +1,76 @@
+#!/usr/bin/expect -f
+set timeout -1
+
+set script_dir [file dirname [file normalize [info script]]]
+cd $script_dir
+
+set host "129.146.47.206"
+set port "22"
+set user "ubuntu"
+set key_file [file join $script_dir "ssh-key-2026-04-07.key"]
+set remote_dir "/home/ubuntu/baby-photo-app"
+
+if {[llength $argv] >= 1} {
+    set host [lindex $argv 0]
+}
+if {[llength $argv] >= 2} {
+    set port [lindex $argv 1]
+}
+if {[llength $argv] >= 3} {
+    set user [lindex $argv 2]
+}
+if {[llength $argv] >= 4} {
+    set key_file [lindex $argv 3]
+}
+if {[llength $argv] >= 5} {
+    set remote_dir [lindex $argv 4]
+}
+
+if {![file exists $key_file]} {
+    puts stderr "SSH key not found: $key_file"
+    exit 1
+}
+
+proc run_or_fail {cmd} {
+    puts ">>> [join $cmd { }]"
+    spawn {*}$cmd
+    expect eof
+    set wait_result [wait]
+    set os_error [lindex $wait_result 2]
+    set exit_code [lindex $wait_result 3]
+
+    if {$os_error != 0 || $exit_code != 0} {
+        puts stderr "Command failed: [join $wait_result { }]"
+        exit 1
+    }
+}
+
+set remote_host "${user}@${host}"
+set ssh_base [list ssh -i $key_file -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR]
+set scp_rsh "ssh -i $key_file -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+
+puts "=== Ensuring remote directory exists ==="
+run_or_fail [concat $ssh_base [list $remote_host "mkdir -p $remote_dir"]]
+
+puts "=== Building frontend locally ==="
+run_or_fail [list npm run build]
+
+puts "=== Syncing project files ==="
+run_or_fail [list \
+    rsync -az --delete \
+    --exclude node_modules \
+    --exclude .git \
+    --exclude .rsbuild \
+    --exclude .DS_Store \
+    --exclude ssh-key-2026-04-07.key \
+    -e $scp_rsh \
+    ./ \
+    "${remote_host}:${remote_dir}/" \
+]
+
+puts "=== Rebuilding and restarting containers ==="
+set remote_deploy_command [format {if command -v docker >/dev/null 2>&1; then cd %s && docker compose up -d --build --remove-orphans && docker compose ps; elif command -v python3 >/dev/null 2>&1; then cd %s && if [ -f baby-photo-app.pid ] && kill -0 "$(cat baby-photo-app.pid)" 2>/dev/null; then kill "$(cat baby-photo-app.pid)"; fi && nohup python3 -m http.server 3456 --bind 0.0.0.0 --directory %s/dist > %s/frontend.log 2>&1 < /dev/null & echo $! > %s/baby-photo-app.pid && sleep 1 && ps -p "$(cat %s/baby-photo-app.pid)" -o pid=,args=; else echo "Neither docker nor python3 is available on the remote host" >&2; exit 1; fi} $remote_dir $remote_dir $remote_dir $remote_dir $remote_dir $remote_dir]
+run_or_fail [concat $ssh_base [list $remote_host $remote_deploy_command]]
+
+puts "=== Deployment completed ==="
+puts "App URL: http://${host}:3456"
